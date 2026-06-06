@@ -1,0 +1,231 @@
+{
+  "name": "AI Knowledge Assistant (Gemini)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai-assistant",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Step 1: Extract payload from webhook ──────────────────\nconst body = $input.first().json.body || $input.first().json;\n\nconst query = body.query || '';\nconst sessionId = body.sessionId || 'default';\nconst documentId = body.documentId || null;\nconst history = body.history || [];\n\nif (!query) throw new Error('query is required');\n\n// ── Step 2: Classify intent via simple keyword matching ───\nlet intent = 'answer';\nconst q = query.toLowerCase();\nif (/\\b(summarize|summarise|summary|tldr|overview)\\b/.test(q)) intent = 'summarise';\nelse if (/\\b(extract|pull out|list all|find all|get all)\\b/.test(q)) intent = 'extract';\nelse if (/\\b(send|email|notify|save|store|create|schedule)\\b/.test(q)) intent = 'action';\n\nreturn [{ json: { query, sessionId, documentId, history, intent } }];"
+      },
+      "id": "parse-and-classify",
+      "name": "Parse & Classify Intent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.intent }}",
+              "operation": "equal",
+              "value2": "action"
+            }
+          ]
+        }
+      },
+      "id": "intent-router",
+      "name": "Route by Intent",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={{ $env.GEMINI_API_KEY }}",
+        "sendHeaders": false,
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"system_instruction\": {\n    \"parts\": [{\n      \"text\": \"You are an AI Knowledge Assistant. Respond ONLY in JSON (no markdown, no code fences): { \\\"intent\\\": \\\"answer|summarise|extract|action\\\", \\\"answer\\\": \\\"...\\\", \\\"keyPoints\\\": [], \\\"extractedData\\\": {}, \\\"confidence\\\": 0.9, \\\"suggestedActions\\\": [] }\"\n    }]\n  },\n  \"contents\": {{ JSON.stringify(\n    [\n      ...$json.history.map(h => ({\n        role: h.role === 'assistant' ? 'model' : 'user',\n        parts: [{ text: h.content }]\n      })),\n      { role: \"user\", parts: [{ text: $json.query }] }\n    ]\n  ) }},\n  \"generationConfig\": {\n    \"temperature\": 0.3,\n    \"maxOutputTokens\": 1000,\n    \"responseMimeType\": \"application/json\"\n  }\n}",
+        "options": {}
+      },
+      "id": "llm-call",
+      "name": "Call LLM (Gemini)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [900, 180]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Gemini response and normalise output\nconst raw = $input.first().json;\n\n// Gemini response structure: candidates[0].content.parts[0].text\nconst text = raw.candidates?.[0]?.content?.parts?.[0]?.text || '{}';\n\nlet parsed;\ntry {\n  // Strip markdown code fences if present (safety net)\n  const clean = text.replace(/```json|```/g, '').trim();\n  parsed = JSON.parse(clean);\n} catch(e) {\n  parsed = { intent: 'answer', answer: text, confidence: 0.8 };\n}\n\nreturn [{ json: {\n  answer: parsed.answer || 'I was unable to generate an answer.',\n  intent: parsed.intent || 'answer',\n  keyPoints: parsed.keyPoints || [],\n  extractedData: parsed.extractedData || {},\n  confidence: parsed.confidence || 0.9,\n  suggestedActions: parsed.suggestedActions || [],\n  actions: [],\n  source: 'n8n-gemini'\n}}];"
+      },
+      "id": "parse-llm-response",
+      "name": "Parse LLM Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 180]
+    },
+    {
+      "parameters": {
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={{ $env.GEMINI_API_KEY }}",
+        "sendHeaders": false,
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"system_instruction\": {\n    \"parts\": [{\n      \"text\": \"Extract the key action from the query. Return ONLY valid JSON (no markdown): { \\\"action_type\\\": \\\"email|save|notify\\\", \\\"recipient\\\": \\\"\\\", \\\"subject\\\": \\\"\\\", \\\"body\\\": \\\"\\\", \\\"data\\\": {} }\"\n    }]\n  },\n  \"contents\": [{\n    \"role\": \"user\",\n    \"parts\": [{ \"text\": {{ JSON.stringify($json.query) }} }]\n  }],\n  \"generationConfig\": {\n    \"temperature\": 0.2,\n    \"maxOutputTokens\": 500,\n    \"responseMimeType\": \"application/json\"\n  }\n}",
+        "options": {}
+      },
+      "id": "extract-action-details",
+      "name": "Extract Action Details (Gemini)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [900, 420]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Gemini action response\nconst raw = $input.first().json;\nconst text = raw.candidates?.[0]?.content?.parts?.[0]?.text || '{}';\n\nlet action;\ntry {\n  const clean = text.replace(/```json|```/g, '').trim();\n  action = JSON.parse(clean);\n} catch(e) {\n  action = { action_type: 'save' };\n}\n\nreturn [{ json: {\n  answer: `Action queued: ${action.action_type}. ${action.body || ''}`,\n  intent: 'action',\n  keyPoints: [],\n  extractedData: {},\n  confidence: 0.85,\n  actions: [action],\n  source: 'n8n-gemini-action'\n}}];"
+      },
+      "id": "parse-action",
+      "name": "Parse Action Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 420]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.actions?.[0]?.action_type }}",
+              "operation": "equal",
+              "value2": "email"
+            }
+          ]
+        }
+      },
+      "id": "action-router",
+      "name": "Route Action Type",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1340, 420]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.EMAIL_FROM || 'assistant@example.com' }}",
+        "toEmail": "={{ $json.actions[0].recipient }}",
+        "subject": "={{ $json.actions[0].subject || 'AI Assistant Result' }}",
+        "emailType": "text",
+        "text": "={{ $json.actions[0].body || $json.answer }}"
+      },
+      "id": "send-email",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [1560, 360],
+      "credentials": {
+        "smtp": {
+          "id": "YOUR_SMTP_CREDENTIAL_ID",
+          "name": "SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Save result to a JSON log file\nconst fs = require('fs');\nconst logFile = '/tmp/ai-assistant-results.json';\n\nlet existing = [];\ntry {\n  existing = JSON.parse(fs.readFileSync(logFile, 'utf8'));\n} catch(e) {}\n\nexisting.push({\n  timestamp: new Date().toISOString(),\n  ...$json\n});\n\nfs.writeFileSync(logFile, JSON.stringify(existing.slice(-100), null, 2));\n\nreturn [{ json: { ...$json, savedToLog: true } }];"
+      },
+      "id": "save-result",
+      "name": "Save Result to Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 520]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge all branches and build final response\nconst data = $input.first().json;\nreturn [{ json: {\n  answer: data.answer,\n  intent: data.intent,\n  keyPoints: data.keyPoints || [],\n  extractedData: data.extractedData || {},\n  confidence: data.confidence || 0.9,\n  actions: data.actions || [],\n  source: data.source || 'n8n-gemini',\n  processedAt: new Date().toISOString()\n}}];"
+      },
+      "id": "merge-response",
+      "name": "Merge & Build Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1800, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "respond-to-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2020, 300]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [{ "node": "Parse & Classify Intent", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse & Classify Intent": {
+      "main": [
+        [{ "node": "Route by Intent", "type": "main", "index": 0 }]
+      ]
+    },
+    "Route by Intent": {
+      "main": [
+        [{ "node": "Extract Action Details (Gemini)", "type": "main", "index": 0 }],
+        [{ "node": "Call LLM (Gemini)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Call LLM (Gemini)": {
+      "main": [
+        [{ "node": "Parse LLM Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse LLM Response": {
+      "main": [
+        [{ "node": "Merge & Build Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Extract Action Details (Gemini)": {
+      "main": [
+        [{ "node": "Parse Action Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse Action Response": {
+      "main": [
+        [{ "node": "Route Action Type", "type": "main", "index": 0 }]
+      ]
+    },
+    "Route Action Type": {
+      "main": [
+        [{ "node": "Send Email", "type": "main", "index": 0 }],
+        [{ "node": "Save Result to Log", "type": "main", "index": 0 }]
+      ]
+    },
+    "Send Email": {
+      "main": [
+        [{ "node": "Merge & Build Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Save Result to Log": {
+      "main": [
+        [{ "node": "Merge & Build Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Merge & Build Response": {
+      "main": [
+        [{ "node": "Respond to Webhook", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": ["ai", "knowledge-assistant", "gemini", "free"]
+}

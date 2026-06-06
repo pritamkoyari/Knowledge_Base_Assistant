@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables (NEVER commit these)
+.env
+.env.local
+.env.development
+.env.production
+
+# Uploads (user files)
+uploads/
+*.pdf
+*.txt
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build output
+dist/
+build/
+
+# n8n local data
+.n8n/
+
+# IDE files
+.vscode/
+.idea/
